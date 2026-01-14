@@ -224,7 +224,9 @@ if __name__ == "__main__":
     tr = 0.8  # training ratio
     pxs = 100  # collected data pixels
 
-    data = np.load('data/%s_data/%s_data_robo%d(%s).npz'%(sim_real,sim_real,robotid,arm_ee))
+    # data = np.load('data/%s_data/%s_data_robo%d(%s).npz'%(sim_real,sim_real,robotid,arm_ee))
+    data = np.load('/data/yxk/K-data/K/fllm-sm/sim/tdcr_multiview_100.npz')
+
 
     # ---- multi-view additions ----
     DOF = int(data["angles"].shape[1])
@@ -356,3 +358,23 @@ if __name__ == "__main__":
     record_file_train.close()
     record_file_val.close()
 
+'''
+sanity check
+
+python - <<'PY'
+import numpy as np
+p = "/data/yxk/K-data/K/fllm-sm/sim/tdcr_multiview_100.npz"
+d = np.load(p)
+
+print("keys:", d.files)
+print("images:", d["images"].shape, d["images"].dtype, "min/max:", d["images"].min(), d["images"].max())
+print("angles:", d["angles"].shape, d["angles"].dtype, "min/max:", d["angles"].min(), d["angles"].max())
+print("rays_o:", d["rays_o"].shape, d["rays_o"].dtype)
+print("rays_d:", d["rays_d"].shape, d["rays_d"].dtype)
+print("near:", d["near"].shape, d["near"])
+print("far :", d["far"].shape, d["far"])
+PY
+
+CUDA_VISIBLE_DEVICES=3 python train.py
+
+'''
