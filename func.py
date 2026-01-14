@@ -194,6 +194,8 @@ def crop_rays_center(
     rd = rays_d.reshape(height, width, 3)[h_offset:-h_offset, w_offset:-w_offset]
     return ro.reshape(-1, 3), rd.reshape(-1, 3)
 
+
+
 def sample_stratified(
         rays_o: torch.Tensor,
         rays_d: torch.Tensor,
@@ -206,6 +208,8 @@ def sample_stratified(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Stratified sampling along each ray.
 
+    This is the core NeRF sampling step.
+
     Args:
         rays_o: (..., 3) ray origins in world coordinates.
         rays_d: (..., 3) ray directions in world coordinates (not necessarily unit length).
@@ -217,15 +221,18 @@ def sample_stratified(
                    (Kept for compatibility with the original codebase's "virtual camera" trick.)
 
     Returns:
-        pts: (..., n_samples, 3)
-        x_vals: (..., n_samples)
+        pts: (..., n_samples, 3) sampled 3D points.
+        x_vals: (..., n_samples) sampled ray parameters.
     """
+
+    # Sample locations along the ray parameter t
     t_vals = torch.linspace(0., 1., n_samples, device=rays_o.device)
     if not inverse_depth:
         x_vals = near * (1. - t_vals) + far * t_vals
     else:
         x_vals = 1. / (1. / near * (1. - t_vals) + 1. / far * t_vals)
 
+    # Stratified perturbation within bins
     if perturb:
         mids = 0.5 * (x_vals[1:] + x_vals[:-1])
         upper = torch.concat([mids, x_vals[-1:]], dim=-1)
@@ -233,15 +240,18 @@ def sample_stratified(
         t_rand = torch.rand([n_samples], device=x_vals.device)
         x_vals = lower + (upper - lower) * t_rand
 
-    x_vals = x_vals.expand(list(rays_o.shape[:-1]) + [n_samples])
-    pts = rays_o[..., None, :] + rays_d[..., None, :] * x_vals[..., :, None]
+    # Expand to match rays
+    x_vals = x_vals.expand(list(rays_o.shape[:-1]) + [n_samples])  # (..., n_samples)
 
+    # Points along ray: p(t) = o + t d
+    pts = rays_o[..., None, :] + rays_d[..., None, :] * x_vals[..., :, None]  # (..., n_samples, 3)
+
+    # Optional global rotation (legacy)
     if transform is not None:
         transform = transform.to(pts)
         pts = torch.matmul(pts, transform)
 
     return pts, x_vals
-
 
 
 
@@ -404,15 +414,16 @@ def model_forward(
 ):
     """Forward pass: sample points on rays -> query MLP -> render mask.
 
-    Multi-view/TDCR adaptation:
-      - Use ALL DOF values in arm_angle as conditioning input.
-      - No "virtual camera" special-casing of the first two joints.
+    For TDCR / multi-view adaptation, we treat *all* DOF values in `arm_angle` as conditioning
+    inputs (no special-casing of the first two joints as a "virtual camera").
     """
 
+    # Sample query points along each ray.
     query_points, z_vals = sample_stratified(
         rays_o, rays_d, near, far, n_samples=n_samples
     )
 
+    # Build MLP inputs: [x,y,z, motor_1..motor_DOF]
     if DOF > 0:
         arm_angle = arm_angle[:DOF].to(query_points)  # (DOF,)
         cmd = arm_angle.repeat(list(query_points.shape[:2]) + [1])  # (N_rays, N_samples, DOF)
@@ -420,6 +431,7 @@ def model_forward(
     else:
         model_input = query_points
 
+    # Chunked inference to fit GPU memory
     batches = prepare_chunks(model_input, chunksize=chunksize)
     predictions = []
     for batch in batches:
@@ -446,7 +458,6 @@ def model_forward(
         'query_points': query_points
     }
     return outputs
-
 
 
 # ---------------------------------------------------------
