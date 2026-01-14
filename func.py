@@ -167,48 +167,81 @@ def get_rays(
     rays_d = rays_d.reshape(-1,3)
     return rays_o, rays_d
 
+def crop_rays_center(
+        rays_o: torch.Tensor,
+        rays_d: torch.Tensor,
+        height: int,
+        width: int,
+        frac: float = 0.5
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Crop the central region of rays (to match `crop_center` on the target image).
+
+    Assumes rays are flattened in row-major (H,W) order:
+      idx = y * W + x
+
+    Args:
+        rays_o, rays_d: (H*W, 3)
+        height, width: original image size
+        frac: keep the central `frac` portion in each dimension (default 0.5 -> keep center 50%)
+
+    Returns:
+        cropped_rays_o, cropped_rays_d: ((H*frac)*(W*frac), 3)
+    """
+    h_offset = round(height * (frac / 2))
+    w_offset = round(width * (frac / 2))
+
+    ro = rays_o.reshape(height, width, 3)[h_offset:-h_offset, w_offset:-w_offset]
+    rd = rays_d.reshape(height, width, 3)[h_offset:-h_offset, w_offset:-w_offset]
+    return ro.reshape(-1, 3), rd.reshape(-1, 3)
+
 def sample_stratified(
         rays_o: torch.Tensor,
         rays_d: torch.Tensor,
-        arm_angle: torch.Tensor,
         near: float,
         far: float,
         n_samples: int,
         perturb: Optional[bool] = True,
-        inverse_depth: bool = False
+        inverse_depth: bool = False,
+        transform: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Stratified sampling along each ray.
 
-    # Grab samples for space integration along ray
+    Args:
+        rays_o: (..., 3) ray origins in world coordinates.
+        rays_d: (..., 3) ray directions in world coordinates (not necessarily unit length).
+        near, far: scalar bounds for the ray parameter t.
+        n_samples: number of samples per ray.
+        perturb: if True, adds stratified random jitter within each bin.
+        inverse_depth: if True, sample linearly in inverse depth.
+        transform: optional (3,3) rotation matrix applied to sampled points.
+                   (Kept for compatibility with the original codebase's "virtual camera" trick.)
+
+    Returns:
+        pts: (..., n_samples, 3)
+        x_vals: (..., n_samples)
+    """
     t_vals = torch.linspace(0., 1., n_samples, device=rays_o.device)
     if not inverse_depth:
-        # Sample linearly between `near` and `far`
-        x_vals = near * (1. - t_vals) + far * (t_vals)
+        x_vals = near * (1. - t_vals) + far * t_vals
     else:
-        # Sample linearly in inverse depth (disparity)
-        x_vals = 1. / (1. / near * (1. - t_vals) + 1. / far * (t_vals))
+        x_vals = 1. / (1. / near * (1. - t_vals) + 1. / far * t_vals)
 
-    # Draw uniform samples from bins along ray
     if perturb:
-        mids = .5 * (x_vals[1:] + x_vals[:-1])
+        mids = 0.5 * (x_vals[1:] + x_vals[:-1])
         upper = torch.concat([mids, x_vals[-1:]], dim=-1)
         lower = torch.concat([x_vals[:1], mids], dim=-1)
         t_rand = torch.rand([n_samples], device=x_vals.device)
         x_vals = lower + (upper - lower) * t_rand
+
     x_vals = x_vals.expand(list(rays_o.shape[:-1]) + [n_samples])
-
-
     pts = rays_o[..., None, :] + rays_d[..., None, :] * x_vals[..., :, None]
 
-    pose_matrix = pts_trans_matrix(arm_angle[0], arm_angle[1])
-
-    pose_matrix = pose_matrix.to(pts)
-    # Transpose your transformation matrix for correct matrix multiplication
-    transformation_matrix = pose_matrix[:3,:3]
-
-    # Apply the transformation
-    pts = torch.matmul(pts,transformation_matrix)
+    if transform is not None:
+        transform = transform.to(pts)
+        pts = torch.matmul(pts, transform)
 
     return pts, x_vals
+
 
 
 
@@ -369,19 +402,24 @@ def model_forward(
         n_samples: int = 64,
         output_flag: int = 0
 ):
+    """Forward pass: sample points on rays -> query MLP -> render mask.
 
-    # Sample query points along each ray.
+    Multi-view/TDCR adaptation:
+      - Use ALL DOF values in arm_angle as conditioning input.
+      - No "virtual camera" special-casing of the first two joints.
+    """
+
     query_points, z_vals = sample_stratified(
-        rays_o, rays_d, arm_angle, near, far, n_samples=n_samples)
-    # Prepare batches.
+        rays_o, rays_d, near, far, n_samples=n_samples
+    )
 
-    arm_angle = arm_angle / 180 * np.pi
-    if DOF > 2:
-        model_input = torch.cat((query_points, arm_angle[2:DOF].repeat(list(query_points.shape[:2]) + [1])), dim=-1)
-
-    # arm_angle[:DOF] -> use one angle
+    if DOF > 0:
+        arm_angle = arm_angle[:DOF].to(query_points)  # (DOF,)
+        cmd = arm_angle.repeat(list(query_points.shape[:2]) + [1])  # (N_rays, N_samples, DOF)
+        model_input = torch.cat((query_points, cmd), dim=-1)
     else:
-        model_input = query_points  # orig version 3 input 2dof, Mar30
+        model_input = query_points
+
     batches = prepare_chunks(model_input, chunksize=chunksize)
     predictions = []
     for batch in batches:
@@ -390,24 +428,25 @@ def model_forward(
     raw = torch.cat(predictions, dim=0)
     raw = raw.reshape(list(query_points.shape[:2]) + [raw.shape[-1]])
 
-    if output_flag ==0:
+    if output_flag == 0:
         rgb_map, rgb_each_point = OM_rendering(raw)
-    elif output_flag ==1:
+    elif output_flag == 1:
         rgb_map, rgb_each_point = VR_rendering(raw, z_vals, rays_d)
-    elif output_flag ==2:
+    elif output_flag == 2:
         rgb_map, rgb_each_point = VRAT_rendering(raw, z_vals, rays_d)
-    elif output_flag ==3:
-        rgb_map,rgb_each_point, visibility = OM_rendering_split_output(raw)
+    elif output_flag == 3:
+        rgb_map, rgb_each_point, visibility = OM_rendering_split_output(raw)
         return rgb_map, query_points, rgb_each_point, visibility
-
+    else:
+        raise ValueError(f"Unknown output_flag={output_flag}")
 
     outputs = {
         'rgb_map': rgb_map,
         'rgb_each_point': rgb_each_point,
-        'query_points': query_points}
-
-    # Store outputs.
+        'query_points': query_points
+    }
     return outputs
+
 
 
 # ---------------------------------------------------------
