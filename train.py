@@ -808,12 +808,19 @@ print("near:", d["near"].shape, d["near"])
 print("far :", d["far"].shape, d["far"])
 PY
 
-CUDA_VISIBLE_DEVICES=4 python train.py \
+
+
+CUDA_VISIBLE_DEVICES=5 python train.py \
   --data /data/yxk/K-data/K/fllm-sm/sim/sim_2m_no_base.npz \
   --views_per_step 4 \
   --valid_amount_eval 8 \
   --valid_views_eval 0 \
   --log_dir sim_2m_no_base
 
-
+CUDA_VISIBLE_DEVICES=3 python train.py \
+  --data /data/yxk/K-data/K/fllm-sm/sim/sim_2m_with_base.npz \
+  --views_per_step 4 \
+  --valid_amount_eval 8 \
+  --valid_views_eval 0 \
+  --log_dir sim_2m_with_base
 '''
