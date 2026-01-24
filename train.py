@@ -699,7 +699,7 @@ if __name__ == "__main__":
     n_iters = 400000
     one_image_per_step = True  # One image per gradient step (disables batching)
     chunksize = 2 ** 20  # Modify as needed to fit in GPU memory
-    center_crop = True  # Crop the center of image (one_image_per_)   # debug
+    center_crop = False  # Crop the center of image (one_image_per_)   # debug
     center_crop_iters = 200  # Stop cropping center after this many epochs
     display_rate = 1000 #int(select_data_amount*tr)  # Display test output every X epochs
 
@@ -823,4 +823,18 @@ CUDA_VISIBLE_DEVICES=3 python train.py \
   --valid_amount_eval 8 \
   --valid_views_eval 0 \
   --log_dir sim_2m_with_base
+
+CUDA_VISIBLE_DEVICES=1 python train.py \
+  --data /data/yxk/K-data/K/fllm-sm/sim/sim_3m_no_base_auto_nf.npz \
+  --views_per_step 4 \
+  --valid_amount_eval 8 \
+  --valid_views_eval 0 \
+  --log_dir sim_3m_no_base
+
+CUDA_VISIBLE_DEVICES=1 python train.py \
+  --data /data/yxk/K-data/K/fllm-sm/sim/sim_5m_no_base_auto_nf.npz \
+  --views_per_step 4 \
+  --valid_amount_eval 8 \
+  --valid_views_eval 0 \
+  --log_dir sim_5m_no_base
 '''
