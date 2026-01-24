@@ -236,7 +236,12 @@ def train(model, optimizer):
             )
 
             pred = outputs['rgb_map']
-            view_losses.append(torch.nn.functional.mse_loss(pred, target_flat))
+            # view_losses.append(torch.nn.functional.mse_loss(pred, target_flat))
+            # 改为 前景加权 MSE
+            w_pos = 30.0
+            w = 1.0 + w_pos * target_flat   # target_flat 是 0/1
+            view_losses.append(((pred - target_flat) ** 2 * w).mean())
+
 
         loss = torch.stack(view_losses).mean()
 
@@ -808,7 +813,7 @@ print("near:", d["near"].shape, d["near"])
 print("far :", d["far"].shape, d["far"])
 PY
 
-
+/data/yxk/K-data/K/fllm-sm/sim/sim_2m_no_base_new.npz
 
 CUDA_VISIBLE_DEVICES=5 python train.py \
   --data /data/yxk/K-data/K/fllm-sm/sim/sim_2m_no_base.npz \
@@ -816,6 +821,14 @@ CUDA_VISIBLE_DEVICES=5 python train.py \
   --valid_amount_eval 8 \
   --valid_views_eval 0 \
   --log_dir sim_2m_no_base
+
+CUDA_VISIBLE_DEVICES=1 python train.py \
+  --data /data/yxk/K-data/K/fllm-sm/sim/sim_2m_no_base_new.npz \
+  --views_per_step 4 \
+  --valid_amount_eval 8 \
+  --valid_views_eval 0 \
+  --log_dir sim_2m_no_base_new
+  
 
 CUDA_VISIBLE_DEVICES=3 python train.py \
   --data /data/yxk/K-data/K/fllm-sm/sim/sim_2m_with_base.npz \
@@ -831,10 +844,4 @@ CUDA_VISIBLE_DEVICES=1 python train.py \
   --valid_views_eval 0 \
   --log_dir sim_3m_no_base
 
-CUDA_VISIBLE_DEVICES=1 python train.py \
-  --data /data/yxk/K-data/K/fllm-sm/sim/sim_5m_no_base_auto_nf.npz \
-  --views_per_step 4 \
-  --valid_amount_eval 8 \
-  --valid_views_eval 0 \
-  --log_dir sim_5m_no_base
 '''

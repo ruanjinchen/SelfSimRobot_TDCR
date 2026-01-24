@@ -6,6 +6,7 @@ import os
 from tqdm import trange
 import torch
 from torch import nn
+import torch.nn.functional as F
 from typing import Optional, Tuple, List, Union, Callable
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 
@@ -293,21 +294,70 @@ def VRAT_rendering(
     return render_img, alpha_dense
 
 def OM_rendering(
-        raw: torch.Tensor
+        raw: torch.Tensor,
+        z_vals: Optional[torch.Tensor] = None,
+        rays_d: Optional[torch.Tensor] = None,
+        eps: float = 1e-10,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Stable occupancy-mask rendering.
 
-    alpha = 1.0 - torch.exp(-nn.functional.relu(raw[..., 1]))
-    rgb_each_point = alpha*raw[..., 0]
-    render_img = torch.sum(rgb_each_point, dim=1)
+    The original version used ReLU on the density channel (raw[...,1]), which can lead to
+    alpha==0 for *all* samples at initialization (dead gradients -> training stuck at black).
+    This version uses:
+      - sigma = softplus(raw[...,1])  (positive, no ReLU dead zone)
+      - vis   = sigmoid(raw[...,0])   (map to [0,1] for mask supervision)
+      - standard alpha compositing along the ray when z_vals/rays_d are provided.
 
-    return render_img, alpha
+    Args:
+        raw:   (N_rays, N_samples, 2)  raw[...,0]=visibility logits, raw[...,1]=density logits
+        z_vals:(N_rays, N_samples)     ray parameters from stratified sampling
+        rays_d:(N_rays, 3)             ray directions (may be non-unit)
+        eps:   small constant for numerical stability
 
-def OM_rendering_split_output(raw):
-    alpha = 1.0 - torch.exp(-nn.functional.relu(raw[..., 1]))
-    rgb_each_point = alpha*raw[..., 0]
-    render_img = torch.sum(rgb_each_point, dim=1)
-    visibility = raw[..., 0]
-    return render_img, alpha, visibility
+    Returns:
+        rgb_map: (N_rays,) rendered mask in [0,1]
+        alpha:   (N_rays, N_samples) per-sample alpha (useful for debugging)
+    """
+    vis = torch.sigmoid(raw[..., 0])
+
+    # Softplus keeps sigma > 0 and avoids the ReLU dead zone.
+    sigma = F.softplus(raw[..., 1])
+
+    # Fallback: if no distances are provided, behave like the old OM renderer
+    # but still keep it differentiable (no ReLU).
+    if (z_vals is None) or (rays_d is None):
+        alpha = 1.0 - torch.exp(-sigma)
+        rgb_each_point = alpha * vis
+        rgb_map = torch.sum(rgb_each_point, dim=1)
+        return rgb_map, alpha
+
+    # Convert z_vals deltas to euclidean distances (directions may be non-unit).
+    dists = z_vals[..., 1:] - z_vals[..., :-1]
+    # Append a finite last interval (avoid +inf, since sigma>0 would force alpha->1)
+    dists = torch.cat([dists, dists[..., -1:]], dim=-1)
+    dists = dists * torch.norm(rays_d[..., None, :], dim=-1)
+
+    alpha = 1.0 - torch.exp(-sigma * dists)
+
+    # Standard transmittance and weights
+    T = torch.cumprod(
+        torch.cat([torch.ones_like(alpha[..., :1]), 1.0 - alpha + eps], dim=-1),
+        dim=-1
+    )[..., :-1]
+    weights = alpha * T
+
+    rgb_map = torch.sum(weights * vis, dim=1)
+    return rgb_map, alpha
+
+def OM_rendering_split_output(
+        raw: torch.Tensor,
+        z_vals: Optional[torch.Tensor] = None,
+        rays_d: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Like OM_rendering, but also returns the (sigmoid) visibility field."""
+    rgb_map, alpha = OM_rendering(raw, z_vals=z_vals, rays_d=rays_d)
+    visibility = torch.sigmoid(raw[..., 0])
+    return rgb_map, alpha, visibility
 
 def sample_pdf(
         bins: torch.Tensor,
@@ -441,13 +491,13 @@ def model_forward(
     raw = raw.reshape(list(query_points.shape[:2]) + [raw.shape[-1]])
 
     if output_flag == 0:
-        rgb_map, rgb_each_point = OM_rendering(raw)
+        rgb_map, rgb_each_point = OM_rendering(raw, z_vals=z_vals, rays_d=rays_d)
     elif output_flag == 1:
         rgb_map, rgb_each_point = VR_rendering(raw, z_vals, rays_d)
     elif output_flag == 2:
         rgb_map, rgb_each_point = VRAT_rendering(raw, z_vals, rays_d)
     elif output_flag == 3:
-        rgb_map, rgb_each_point, visibility = OM_rendering_split_output(raw)
+        rgb_map, rgb_each_point, visibility = OM_rendering_split_output(raw, z_vals=z_vals, rays_d=rays_d)
         return rgb_map, query_points, rgb_each_point, visibility
     else:
         raise ValueError(f"Unknown output_flag={output_flag}")
